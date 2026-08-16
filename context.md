@@ -145,6 +145,33 @@ Voucher→Token page now shows a token+amount form instead of a dead end,
 using the same Keplr-signed send → verify → payout flow as the original
 path.
 
+## Second gap found post-delivery: `/admin/reserve` page (fixed)
+
+After reviewing the delivery, the client flagged a page
+(`/admin/reserve`, "Reserve" in the admin sidebar) that still showed no
+real broadcast. This is a **separate, older page** from the Airdrop page's
+Reserve/Send forms fixed above — `src/routes/admin.reserve.tsx`
+("Voucher Reserve Supply"), backed by `handleMintReserve` /
+`handleBurnReserve` in `routes.ts`. It was never touched by the original
+fix — never mentioned in the original bug report, not part of the
+delivered scope — and its Mint/Burn actions still called pure simulation
+(`sim.mintReserveVoucher` / `sim.burnReserveVoucher`), the same class of
+bug as the original issue, just on a page nobody had looked at yet.
+
+Fixed with the identical pattern already proven on the Airdrop page: both
+handlers now attempt a real on-chain `MsgMint`/`MsgBurn` via the same
+treasury signer, denom-exists check, gas check, and (for burns) a real
+on-chain balance check, before falling back to simulation with a clear
+`onchainError`. `admin.reserve.tsx` updated to show the same
+"View on Mintscan" / "Simulated only — \<reason\>" toast pattern used on
+the Airdrop page. Typecheck + build verified clean afterward; only
+`src/api/routes.ts` and `src/routes/admin.reserve.tsx` touched.
+
+Confirmed against the client's actual Fiverr order details that this was
+**not** part of the paid delivery ("fixing the current airdrop bot" /
+"the Keplr transaction signing and broadcasting issue") — offered to the
+client as separate follow-up work rather than bundled into this delivery.
+
 ## Testing infrastructure added
 
 - `.env.testnet` — dedicated, freshly-generated test treasury wallet
@@ -174,10 +201,82 @@ path.
   redemption (steps 5-7) to actually pay out real LVN — currently set to
   `true`.
 
+## Real LVN top-up performed (self-funded, not by the client)
+
+Rather than asking the client to fund LVN directly, swapped a small amount
+of the treasury's own OSMO for real LVN via an OSMO/LVN pool that already
+exists on Osmosis mainnet (pool `1325`, found via Osmosis's SQS router —
+`swapOnOsmosis()`'s built-in pool-discovery scan times out against this
+LCD endpoint because it pages through every pool on mainnet to find it;
+worked around by calling the pool's single-pool estimate + swap endpoints
+directly with the known pool ID instead of the generic multi-pool-scan
+path):
+- Swap 1: 1 OSMO → 55.078441 LVN
+  (tx `8D33E330765F769A1FD10AABE69CB855B7B8A1C0B69F54FBFC6F0D66372EA5B3`)
+- Swap 2: 0.92 OSMO → 50.658045 LVN
+  (tx `9DD238EA11A827167409E9DBFBF023367100A95974E7EAE534FCF0DA34947F4C`)
+
+Treasury LVN peaked at 105.86 LVN after both swaps. Balance has moved since
+from real redemption-flow testing (each real redemption pays real LVN out
+of the treasury 1:1) and is now further constrained by the OSMO depletion
+below (no OSMO left to swap more LVN in until treasury gas is restored).
+
+## Treasury OSMO drained via a Keplr cross-chain swap (informational — not a code bug)
+
+On 2026-08-15 ~18:42 UTC the treasury's real OSMO balance dropped from
+~88 OSMO to 0. Root-caused via the treasury's live transaction history
+(`GET /cosmos/tx/v1beta1/txs?query=message.sender='<treasury>'` against the
+LCD): the last transaction
+(`D9CC4A526E2053D7B12677E41B12D44D958065F986EC0BFEAEB0736FAC4152BE`) is a
+`MsgExecuteContract` against a Skip Protocol swap-and-transfer router
+(`osmo10a3k4hvk37cc4hnxctw4p95fhscd2z6h2rmx0aukc6rm8u9qqx9smfsh7u`),
+swapping 88.166284 OSMO → ATOM via pool `1135`, then IBC-transferring the
+resulting ATOM to `cosmos18m3pl3jl8wmnvckf3a02ydqygxx0m2tf...` — **the same
+treasury account, just its Cosmos Hub address** (the tx's own
+`recover_address` field is the treasury's own `osmo1...` address,
+confirming the tx was signed by the treasury's own key, not executed by a
+third party without access to it).
+
+Not theft: the funds are intact, as real ATOM, in the same wallet's Cosmos
+Hub address. Most likely an accidental interaction with Keplr's own
+built-in cross-chain swap/stake feature while the treasury account was the
+active account selected in Keplr (a "stake 50 ATOM" promo banner was
+visible in Keplr during testing sessions around this time).
+
+**Net effect:** treasury currently holds 0 native OSMO on Osmosis — no gas
+for any further real mint/send/burn broadcast until either (a) the ATOM is
+IBC-transferred back to Osmosis and swapped back to OSMO, or (b) the
+treasury is re-funded directly with OSMO.
+
+## Operational notes discovered during live client testing
+
+- A **user's own wallet** needs its own small OSMO balance to pay gas for
+  the Keplr-signed "return" leg of a Voucher→Token redemption (sending the
+  voucher token back to the treasury) — the treasury's own OSMO does not
+  cover this, since each signer pays its own transaction fee. Funded via a
+  one-off `sendFromTreasury` script; ~0.1 OSMO comfortably covers many
+  redemption attempts (real observed fee ≈0.005 OSMO/tx).
+- Wallet balances shown in the app (`/app/wallet`, etc.) are a **session
+  snapshot** saved to the backend at Keplr *connect* time
+  (`readAllBalances()` + `walletAPI.saveSession()` in
+  `wallet-connect.tsx`), not a live per-render chain query —
+  `store.tsx`'s `refreshAppState()` just re-reads that saved snapshot on
+  mount. Funding a wallet with new OSMO/tokens mid-session does not appear
+  in the UI until the wallet is disconnected and reconnected in the app,
+  which forces a fresh on-chain read.
+
 ## Current status
 
-Code fix is complete, typechecked, and build-verified clean. Fully rehearsed
-end-to-end on testnet with independently-verified real transactions. Real
-mainnet treasury is funded for gas. Blocked only on: (1) confirming the LVN
-top-up amount with the client, and (2) running the same walkthrough once
-more against real mainnet for the actual delivery recording.
+Airdrop-page code fix (the paid delivery) is complete, typechecked, and
+build-verified clean. Fully rehearsed end-to-end on testnet with
+independently-verified real transactions, then walked through live against
+real mainnet with the client (steps 1–7), each step independently
+confirmed on-chain. A second, separately-scoped simulation gap
+(`/admin/reserve`) was found and fixed post-delivery, offered to the client
+as follow-up work rather than folded into the original order.
+
+Currently blocked on: **treasury has 0 native OSMO** (see "Treasury OSMO
+drained" above) — no further real broadcasts (airdrop, reserve mint/burn,
+or additional LVN top-ups) are possible until it's re-funded or the
+swapped ATOM is recovered back to OSMO. LVN balance for redemption demos is
+otherwise healthy (double digits) as of the last check.

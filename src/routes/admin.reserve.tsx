@@ -42,7 +42,21 @@ function ReservePage() {
         : await adminAPI.burnReserve(vToken, amount);
         
       if (res.success) {
-        toast.success(`Successfully ${action === "mint" ? "minted" : "burned"} ${amount} ${vToken}`);
+        const verb = action === "mint" ? "Minted" : "Burned";
+        if (res.onchainTxHash) {
+          toast.success(
+            <span>
+              {verb} {amount} {vToken} on-chain.{" "}
+              <a href={res.mintscanUrl} target="_blank" rel="noopener noreferrer" className="underline">
+                View on Mintscan
+              </a>
+            </span>,
+          );
+        } else if (res.onchainError) {
+          toast.warning(`Simulated only — ${res.onchainError}`);
+        } else {
+          toast.success(`${verb} ${amount} ${vToken} (simulated).`);
+        }
         loadData();
       } else {
         toast.error(res.message || "Action failed");

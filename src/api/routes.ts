@@ -1576,20 +1576,165 @@ export async function handleCheckExplorer(body: any) {
 }
 
 // Admin Endpoints
+//
+// Mirrors handleContractReserve/handleContractSend below: the simulated
+// ledger (sim.mintReserveVoucher) always runs first to keep the admin UI's
+// counters in sync, then a real on-chain mint is attempted whenever the
+// token is a confirmed Token Factory denom and the treasury has gas —
+// falling back to simulation-only with a clear onchainError otherwise. This
+// page previously had no real path at all (a separate gap from the one
+// fixed in handleContractReserve, discovered after delivery via this exact
+// page's "Reserve" sidebar entry never broadcasting anything).
 export async function handleMintReserve(userId: string, body: any) {
   const { vToken, amount } = body;
   const qty = Number(amount);
   if (!qty || qty <= 0) return { success: false, message: "Invalid amount" };
+  if (!Number.isFinite(qty) || qty > MAX_ADMIN_TOKEN_AMOUNT) {
+    return { success: false, message: `Amount must be a finite number no greater than ${MAX_ADMIN_TOKEN_AMOUNT}` };
+  }
+
   const res = await sim.mintReserveVoucher(userId, vToken, qty);
-  return res;
+  if (!res.success) return res;
+
+  const { claim, release } = await import("./locks");
+  const reserveKey = `mint-reserve:${vToken}`;
+  if (!claim(reserveKey)) {
+    return { ...res, onchainError: "A reserve mint for this token is already in progress." };
+  }
+
+  try {
+    const { chainConfigured } = await import("./cosmos/status.server");
+    if (!chainConfigured()) return res;
+
+    const { getProtocolSigner, hasSufficientGas } = await import("./cosmos/signer.server");
+    const { buildFactoryDenom, voucherSubdenom } = await import("@/lib/cosmos/denom");
+    const { denomExistsForCreator } = await import("./cosmos/osmosisLcd.server");
+    const { mintToAddress } = await import("./cosmos/tokenFactory.server");
+    const { toMicroUnits } = await import("@/lib/cosmos/realDenoms");
+
+    const signer = await getProtocolSigner();
+    const denom = buildFactoryDenom(signer.address, voucherSubdenom(vToken));
+
+    const exists = await denomExistsForCreator(denom, signer.address);
+    if (!exists) {
+      return { ...res, onchainError: `${vToken} has no real Token Factory denom on-chain yet — minted in simulation only.` };
+    }
+
+    const gas = await hasSufficientGas();
+    if (!gas.ok) {
+      return { ...res, onchainError: `Treasury needs funding for gas (has ${gas.balanceOSMO} OSMO) — minted in simulation only.` };
+    }
+
+    const microAmount = toMicroUnits(qty, 6);
+    const mintResult = await mintToAddress(denom, microAmount, signer.address);
+
+    await db.createAuditLog({
+      id: "log_" + nanoid(12),
+      user_id: userId,
+      action: "MINT_RESERVE_ONCHAIN",
+      resource_type: "reserve",
+      resource_id: vToken,
+      details: { amount: qty, denom, txHash: mintResult.txHash },
+      timestamp: Date.now(),
+    });
+
+    return {
+      ...res,
+      onchainTxHash: mintResult.txHash,
+      mintscanUrl: MINTSCAN_TX(mintResult.txHash),
+      message: `Minted ${qty} ${vToken} on-chain (tx: ${mintResult.txHash.slice(0, 12)}…)`,
+    };
+  } catch (e: any) {
+    console.error("[handleMintReserve] on-chain mint failed:", e);
+    return { ...res, onchainError: e?.message || String(e) };
+  } finally {
+    release(reserveKey);
+  }
 }
 
 export async function handleBurnReserve(userId: string, body: any) {
   const { vToken, amount } = body;
   const qty = Number(amount);
   if (!qty || qty <= 0) return { success: false, message: "Invalid amount" };
+  if (!Number.isFinite(qty) || qty > MAX_ADMIN_TOKEN_AMOUNT) {
+    return { success: false, message: `Amount must be a finite number no greater than ${MAX_ADMIN_TOKEN_AMOUNT}` };
+  }
+
   const res = await sim.burnReserveVoucher(userId, vToken, qty);
-  return res;
+  if (!res.success) return res;
+
+  const { claim, release } = await import("./locks");
+  const reserveKey = `burn-reserve:${vToken}`;
+  if (!claim(reserveKey)) {
+    return { ...res, onchainError: "A reserve burn for this token is already in progress." };
+  }
+
+  try {
+    const { chainConfigured } = await import("./cosmos/status.server");
+    if (!chainConfigured()) return res;
+
+    const { getProtocolSigner, hasSufficientGas, readOnlyClient } = await import("./cosmos/signer.server");
+    const { buildFactoryDenom, voucherSubdenom } = await import("@/lib/cosmos/denom");
+    const { denomExistsForCreator } = await import("./cosmos/osmosisLcd.server");
+    const { burnFromTreasury } = await import("./cosmos/tokenFactory.server");
+    const { toMicroUnits } = await import("@/lib/cosmos/realDenoms");
+
+    const signer = await getProtocolSigner();
+    const denom = buildFactoryDenom(signer.address, voucherSubdenom(vToken));
+
+    const exists = await denomExistsForCreator(denom, signer.address);
+    if (!exists) {
+      return { ...res, onchainError: `${vToken} has no real Token Factory denom on-chain yet — burned in simulation only.` };
+    }
+
+    const gas = await hasSufficientGas();
+    if (!gas.ok) {
+      return { ...res, onchainError: `Treasury needs funding for gas (has ${gas.balanceOSMO} OSMO) — burned in simulation only.` };
+    }
+
+    const microAmount = toMicroUnits(qty, 6);
+
+    // Confirm the treasury's REAL on-chain balance covers this burn — the
+    // simulated reserve counter above can drift from on-chain reality.
+    const client = await readOnlyClient();
+    let realBalance: string;
+    try {
+      const coin = await client.getBalance(signer.address, denom);
+      realBalance = coin.amount;
+    } finally {
+      client.disconnect();
+    }
+    if (BigInt(realBalance) < BigInt(microAmount)) {
+      return {
+        ...res,
+        onchainError: `Treasury's real on-chain ${vToken} balance is insufficient for this burn — burned in simulation only.`,
+      };
+    }
+
+    const burnResult = await burnFromTreasury(denom, microAmount);
+
+    await db.createAuditLog({
+      id: "log_" + nanoid(12),
+      user_id: userId,
+      action: "BURN_RESERVE_ONCHAIN",
+      resource_type: "reserve",
+      resource_id: vToken,
+      details: { amount: qty, denom, txHash: burnResult.txHash },
+      timestamp: Date.now(),
+    });
+
+    return {
+      ...res,
+      onchainTxHash: burnResult.txHash,
+      mintscanUrl: MINTSCAN_TX(burnResult.txHash),
+      message: `Burned ${qty} ${vToken} on-chain (tx: ${burnResult.txHash.slice(0, 12)}…)`,
+    };
+  } catch (e: any) {
+    console.error("[handleBurnReserve] on-chain burn failed:", e);
+    return { ...res, onchainError: e?.message || String(e) };
+  } finally {
+    release(reserveKey);
+  }
 }
 
 export async function handleGenerateVoucher(userId: string, body: any) {
