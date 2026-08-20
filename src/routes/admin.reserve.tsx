@@ -11,16 +11,19 @@ export const Route = createFileRoute("/admin/reserve")({
 function ReservePage() {
   const [reserves, setReserves] = useState<any>({});
   const [supply, setSupply] = useState<any>({});
+  const [onchainReserve, setOnchainReserve] = useState<Record<string, number>>({});
   const [loading, setLoading] = useState(true);
   const [vToken, setVToken] = useState("");
   const [amount, setAmount] = useState(1000);
   const [action, setAction] = useState<"mint" | "burn">("mint");
+  const [manageLoading, setManageLoading] = useState(false);
 
   const loadData = async () => {
     try {
       const res = await contractAPI.getStatus();
       setReserves(res.status.voucherReserve || {});
       setSupply(res.status.voucherSupply || {});
+      setOnchainReserve(res.status.onchainReserve || {});
       if (!vToken && Object.keys(res.status.voucherSupply || {}).length > 0) {
         setVToken(Object.keys(res.status.voucherSupply)[0]);
       }
@@ -36,11 +39,12 @@ function ReservePage() {
 
   const handleManage = async (e: React.FormEvent) => {
     e.preventDefault();
+    setManageLoading(true);
     try {
-      const res = action === "mint" 
-        ? await adminAPI.mintReserve(vToken, amount) 
+      const res = action === "mint"
+        ? await adminAPI.mintReserve(vToken, amount)
         : await adminAPI.burnReserve(vToken, amount);
-        
+
       if (res.success) {
         const verb = action === "mint" ? "Minted" : "Burned";
         if (res.onchainTxHash) {
@@ -63,6 +67,8 @@ function ReservePage() {
       }
     } catch (err) {
       toast.error("An error occurred");
+    } finally {
+      setManageLoading(false);
     }
   };
 
@@ -77,9 +83,17 @@ function ReservePage() {
         {Object.keys(supply).map(t => (
           <div key={t} className="rounded-xl border border-border bg-card p-5">
             <h3 className="font-semibold text-lg">{t}</h3>
-            <div className="mt-2 text-sm text-muted-foreground">Total Supply: <span className="font-medium text-foreground">{fmt(supply[t])}</span></div>
-            <div className="text-sm text-muted-foreground">Reserve: <span className="font-medium text-foreground">{fmt(reserves[t])}</span></div>
-            <div className="text-sm text-muted-foreground">Circulating: <span className="font-medium text-foreground">{fmt((supply[t] || 0) - (reserves[t] || 0))}</span></div>
+
+            {/* The real, exact balance — the only figure backed by the
+                blockchain. */}
+            <div className="mt-2 text-2xl font-bold text-foreground">
+              {onchainReserve[t] !== undefined ? fmt(onchainReserve[t]) : "—"}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              {onchainReserve[t] !== undefined
+                ? "real balance on Osmosis"
+                : "no real Token Factory denom on-chain for this token yet"}
+            </div>
           </div>
         ))}
       </div>
@@ -103,8 +117,12 @@ function ReservePage() {
           <label className="mb-1 block text-sm font-medium">Amount</label>
           <input type="number" value={amount} onChange={e => setAmount(Number(e.target.value))} required className="w-full rounded-md border border-input bg-transparent px-3 py-2" />
         </div>
-        <button type="submit" className="w-full rounded-md bg-primary px-4 py-2 font-semibold text-primary-foreground">
-          Confirm
+        <button
+          type="submit"
+          disabled={manageLoading}
+          className="w-full rounded-md bg-primary px-4 py-2 font-semibold text-primary-foreground disabled:opacity-60"
+        >
+          {manageLoading ? "Processing..." : "Confirm"}
         </button>
       </form>
     </div>
