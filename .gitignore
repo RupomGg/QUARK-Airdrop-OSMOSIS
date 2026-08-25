@@ -24,6 +24,12 @@ dist-ssr
 # Claude Code local (personal) settings
 .claude/settings.local.json
 
+# One-off maintenance scripts (never meant to ship in the delivered codebase)
+scripts/_tmp_*
+
+# Fiverr chat screenshots / order records (private, not part of the codebase)
+screencapture-fiverr-*.pdf
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

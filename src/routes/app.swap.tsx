@@ -1,4 +1,5 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { z } from "zod";
 import { useState, useMemo, useEffect } from "react";
 import { useStore, fmt, type TokenSymbol } from "@/lib/store";
 import { Button } from "@/components/ui/button";
@@ -21,16 +22,26 @@ import { voucherSubdenom, buildFactoryDenom } from "@/lib/cosmos/denom";
 
 const TREASURY_ADDRESS = (import.meta as any).env?.VITE_TREASURY_ADDRESS || "";
 
+const swapSearchSchema = z.object({
+  // Set by the Dashboard's "Redeem now" banner for real voucher tokens
+  // sitting in the wallet (e.g. from a direct admin airdrop) — jumps
+  // straight to the Voucher → Token wallet-redeem flow instead of
+  // requiring the recipient to find it on their own.
+  redeem: z.string().optional(),
+});
+
 export const Route = createFileRoute("/app/swap")({
   component: SwapPage,
+  validateSearch: swapSearchSchema,
 });
 
 type Mode = "t2v" | "v2t" | "v2v";
 
 function SwapPage() {
   const { user, tokens, vouchers, transactions, refreshAppState } = useStore();
+  const search = Route.useSearch();
   const symbols = Object.keys(tokens) as TokenSymbol[];
-  const [mode, setMode] = useState<Mode>("v2v");
+  const [mode, setMode] = useState<Mode>(search.redeem ? "v2t" : "v2v");
   const [from, setFrom] = useState<TokenSymbol>("");
   const [to, setTo] = useState<TokenSymbol>("");
 
@@ -38,13 +49,19 @@ function SwapPage() {
     if (!from && symbols.length > 0) setFrom(symbols[0]);
     if (!to && symbols.length > 1) setTo(symbols[1]);
   }, [symbols, from, to]);
-  const [amount, setAmount] = useState("100");
+  const [amount, setAmount] = useState(
+    search.redeem && tokens[search.redeem]?.userBalance
+      ? String(tokens[search.redeem]!.userBalance)
+      : "100",
+  );
   const [voucherId, setVoucherId] = useState<string>("");
   // Redeeming a real voucher held in the wallet without a matching DBVoucher
   // record (e.g. received via a direct admin airdrop) — only symbols with a
   // real backing asset can go through this path.
   const realVoucherSymbols = Object.keys(KNOWN_REAL_DENOMS).map((base) => `v${base}`);
-  const [walletRedeemToken, setWalletRedeemToken] = useState<string>("");
+  const [walletRedeemToken, setWalletRedeemToken] = useState<string>(
+    search.redeem && realVoucherSymbols.includes(search.redeem) ? search.redeem : "",
+  );
   const [confirm, setConfirm] = useState(false);
   const [signing, setSigning] = useState<null | "signing" | "broadcasting" | "confirmed">(null);
   const [lastTxHash, setLastTxHash] = useState<string | null>(null);

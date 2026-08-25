@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { useStore, fmt } from "@/lib/store";
+import { KNOWN_REAL_DENOMS } from "@/lib/cosmos/realDenoms";
 import {
   Ticket,
   Coins,
@@ -8,6 +9,8 @@ import {
   ArrowUpRight,
   ArrowDownRight,
   Activity,
+  Gift,
+  ArrowRight,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -38,6 +41,17 @@ function Dashboard() {
   const totalSupply = Object.values(tokens).reduce((s, t) => s + t.supply * t.price, 0);
   const active = vouchers.filter((v) => v.status === "active").length;
 
+  // Real voucher tokens sitting in the connected wallet, ready to redeem for
+  // their real underlying asset — most commonly landed there via a direct
+  // admin airdrop rather than this app's own mint flow, so there's no
+  // DBVoucher record and nothing else on the dashboard would ever surface
+  // them. Without this, a recipient has no way to discover that redeeming
+  // is even possible short of being told where to click.
+  const redeemableAirdrops = Object.keys(KNOWN_REAL_DENOMS)
+    .map((base) => "v" + base)
+    .map((symbol) => ({ symbol, balance: tokens[symbol]?.userBalance || 0 }))
+    .filter((t) => t.balance > 0);
+
   const stats = [
     { k: "Total Vouchers", v: vouchers.length.toLocaleString(), sub: `${active} active`, icon: Ticket, color: "text-primary-foreground" },
     { k: "Total Supply", v: `$${(totalSupply / 1_000_000).toFixed(2)}M`, sub: "Across all tokens", icon: Coins },
@@ -58,6 +72,38 @@ function Dashboard() {
         <h1 className="text-2xl font-bold">Dashboard</h1>
         <p className="text-sm text-muted-foreground">Welcome back, {user.name}</p>
       </div>
+
+      {redeemableAirdrops.length > 0 && (
+        <div className="flex flex-col items-start justify-between gap-3 rounded-xl border border-primary/40 bg-primary/10 p-5 sm:flex-row sm:items-center">
+          <div className="flex items-start gap-3">
+            <div className="rounded-lg bg-primary/20 p-2 text-primary-foreground">
+              <Gift className="size-5" />
+            </div>
+            <div>
+              <div className="font-semibold">
+                You have{" "}
+                {redeemableAirdrops.map((t, i) => (
+                  <span key={t.symbol}>
+                    {i > 0 && ", "}
+                    {fmt(t.balance)} {t.symbol}
+                  </span>
+                ))}{" "}
+                ready to redeem
+              </div>
+              <div className="text-sm text-muted-foreground">
+                These tokens are already in your wallet — redeem them now for the real underlying asset.
+              </div>
+            </div>
+          </div>
+          <Link
+            to="/app/swap"
+            search={{ redeem: redeemableAirdrops[0].symbol }}
+            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground hover:opacity-90"
+          >
+            Redeem now <ArrowRight className="size-4" />
+          </Link>
+        </div>
+      )}
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {stats.map((s) => (
