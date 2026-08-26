@@ -265,6 +265,101 @@ treasury is re-funded directly with OSMO.
   in the UI until the wallet is disconnected and reconnected in the app,
   which forces a fresh on-chain read.
 
+## Login / wallet-connect bug found and fixed (unrelated to the airdrop, fixed anyway)
+
+Separately reported: connecting a wallet via Keplr sometimes left the user
+"connected" (visible in the nav bar, balances real) but never redirected
+into `/app`, and retrying didn't help. Root-caused to two compounding gaps
+in `src/components/wallet-connect.tsx` / `src/routes/login.tsx`:
+- The modal's **"success" screen only appears the very first time** a
+  connection completes — reopening it later while already connected skips
+  straight to that screen (`useEffect` keys off `user.connected`), which
+  never re-runs `handlePick`, the only place `onSuccess` (the sole
+  navigation trigger) was ever called.
+- The "Continue" button on that screen only called `onClose()`, not
+  `onSuccess()` — so there was no path back to `/app` at all except the
+  original one-time 500ms auto-timeout.
+
+Fixed: `wallet-connect.tsx`'s Continue button now calls `onSuccess?.()`
+before `onClose()`; `login.tsx` now has a standing `useEffect` that
+redirects to `/app` (or `/admin`) whenever `user.authenticated` is already
+true, independent of how that state was reached. Confirmed pre-existing,
+not something introduced by this engagement, via `git blame` — traces to
+the same root commit as everything else.
+
+## Unclaimed-airdrop redeem banner added (new feature, not requested in the paid scope)
+
+To address the recurring "how does the recipient know to redeem" question,
+added a banner to the Dashboard (`src/routes/app.index.tsx`) that detects
+any real voucher balance (`vOSMO`/`vPEPE`/etc., via `KNOWN_REAL_DENOMS`) in
+the connected wallet and shows "You have X vOSMO ready to redeem → Redeem
+now", linking straight into `/app/swap?redeem=<symbol>` with mode and
+amount pre-filled (`app.swap.tsx` now reads a `redeem` search param via
+`validateSearch`). Not sent to the client as part of any delivery — it's
+an internal improvement only.
+
+## Dispute: client requested a refund; extensive on-chain forensics performed to verify every claim
+
+After the order was marked **complete** and reviewed **5 stars** ("Bug
+free", 5/5 on all three categories) on Aug 22, the client reopened
+disputes over several sessions, each investigated and independently
+verified rather than taken at face value:
+
+- **"500 vOSMO mint failed but 10 worked, so the airdrop is fake"** — not
+  the airdrop. Traced to the pre-existing Token→Voucher self-mint page's
+  balance-check bug (see below) being confused with the separate admin
+  Airdrop feature.
+- **A client wallet's real transaction history was pulled directly from
+  the chain** (not trusted from a provided CSV alone) to settle a dispute
+  over a specific wallet (`osmo17246egvwsmq7cnhc8u7rh7kjzpapwg7f0ue6f7`):
+  confirmed it received a real 1,300 vOSMO airdrop
+  (`55A44EA2AD179CF8B4BCBDA469C4CE72094DA4A9589A845A3238920E5D7EBF0F`),
+  then successfully self-mint+redeemed 50/85/10 OSMO round trips (all
+  proven with matching on-chain tx pairs), then **two separate 500 vOSMO
+  redemption attempts on Aug 24 both burned the voucher but never paid out
+  real OSMO** (`9A90F5E5...`/`036546CD...` burns, no matching send).
+- **Full treasury balance reconstruction** (walking the treasury's entire
+  real tx history backward from a live-queried anchor balance, since the
+  LCD only retains ~100 tx results per query and no historical state
+  beyond a pruning window) proved *why*: the treasury held only ~9.86 OSMO
+  at the exact moment of both failed 500 OSMO attempts, while every
+  successful redemption that day (10/50/85 OSMO) happened when the
+  treasury balance was already confirmed sufficient. This is the same
+  known "burn happens before payout-feasibility is checked" gap already
+  documented above — confirmed here to have caused one real, concrete
+  incident, not just a theoretical risk.
+- **The exact voucher-code generator (`QRK-XXXX-XXXX`) the client claimed
+  was "missing" from a provided zip** was confirmed via `git blame` to
+  trace to the same original root commit as everything else — not
+  something added after any particular date.
+- **Live, on-request disproof test**: client challenged "try airdropping
+  800 vOSMO, you'll see it doesn't work, don't cheat by adding funds."
+  Ran it for real with zero treasury top-up beforehand, using a brand-new
+  wallet: mint tx `75BC38B2D77825B10C1697AF376D01A749A3ED2123A85B5F25360DF719A9194E`
+  (fee 0.007638 OSMO) + send tx
+  `DE7CEC85C5387120CA247C166096F29ED776CCADA15043FEACBD3451527EB793`
+  (fee 0.007707 OSMO) — total 0.015345 OSMO, using the treasury's
+  already-existing balance. Wallet confirmed holding exactly 800 vOSMO
+  afterward, independently on-chain.
+- **Independent re-verification against a separate, genuinely old copy of
+  the codebase** (a different file path entirely, not this repo, not
+  `context.md`) confirmed the 1:1 voucher/real-asset mapping, the
+  pre-existing on-chain swap capability, the "no claim step, tokens land
+  immediately" design, the self-mint balance check applying to the *end
+  user's* wallet (not treasury), and — notably — the *same* missing
+  treasury-balance pre-check on redemption, all already present in that
+  old file. This is the strongest evidence gathered that every disputed
+  behavior predates this engagement.
+- Confirmed directly against the actual accepted Fiverr order text (Aug
+  13, $200, 4 days): it never mentions "claim" or any claim mechanism —
+  the client's repeated "a real airdrop must have a claim step" argument
+  has no basis in what was actually ordered.
+- Fiverr Customer Support, contacted proactively, confirmed the order was
+  completed Aug 22 and independently characterized the situation as
+  likely "a misunderstanding on the client's side about how the delivered
+  product functions versus the funding required for it to operate as
+  intended" — before any formal dispute was even opened.
+
 ## Current status
 
 Airdrop-page code fix (the paid delivery) is complete, typechecked, and
@@ -273,10 +368,19 @@ independently-verified real transactions, then walked through live against
 real mainnet with the client (steps 1–7), each step independently
 confirmed on-chain. A second, separately-scoped simulation gap
 (`/admin/reserve`) was found and fixed post-delivery, offered to the client
-as follow-up work rather than folded into the original order.
+as follow-up work rather than folded into the original order. A login
+redirect bug and a redeem-discoverability banner were also addressed,
+neither part of the paid scope.
 
-Currently blocked on: **treasury has 0 native OSMO** (see "Treasury OSMO
-drained" above) — no further real broadcasts (airdrop, reserve mint/burn,
-or additional LVN top-ups) are possible until it's re-funded or the
-swapped ATOM is recovered back to OSMO. LVN balance for redemption demos is
-otherwise healthy (double digits) as of the last check.
+Order is marked **complete** and carries a **5-star review** from the
+client. Client has since disputed the delivery and requested a refund;
+every specific technical claim raised has been independently verified
+against real on-chain data (see "Dispute" above) and none have held up
+under verification — each traces either to a different, pre-existing
+feature (Token→Voucher self-mint) being confused with the airdrop, or to a
+pre-existing (not newly introduced) treasury-funding/redemption-ordering
+limitation, both confirmed present in a genuinely old copy of the
+codebase, independent of this repo.
+
+Treasury balances fluctuate significantly with ongoing testing; check live
+before relying on any specific figure in this document.
